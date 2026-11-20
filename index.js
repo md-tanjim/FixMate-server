@@ -472,7 +472,7 @@ await paymentsCollection.createIndex(
 
 
 
-//---------------------------------ALL Stripe, Payment, Premium Ures Related APIs--------------------------//
+//---------------------------------ALL Stripe, Payment Ures Related APIs--------------------------//
 
 
 
@@ -594,6 +594,7 @@ app.post("/api/payments/create-checkout-session", verifyToken, verifyCustomer, a
 );
 
 
+//---------------------------------ALL Stripe, Payment,Usres Related APIs--------------------------//
 
 
 
@@ -603,7 +604,7 @@ app.post("/api/payments/create-checkout-session", verifyToken, verifyCustomer, a
 
 
 
-//----------------------------^^-----All Service API-------^^^----------------------//
+
 
 
 
@@ -734,6 +735,167 @@ app.get("/customer/payments", verifyToken, verifyCustomer, async (req, res) => {
 }
 );
 
+
+
+//service booking 
+app.post("/customer/bookings",verifyToken,verifyCustomer,async (req, res) => {
+    try {
+      const {
+        serviceId,
+        customerPhone,
+        address,
+        preferredDate,
+        problemDescription,
+      } = req.body;
+
+      //Validate customer input
+      const phone = customerPhone?.trim();
+      const serviceAddress = address?.trim();
+      const description = problemDescription?.trim();
+
+      if (!phone || !serviceAddress || !preferredDate || !description) {
+        return res.status(400).send({
+          success: false,
+          message: "Please provide all required booking information.",
+        });
+      }
+
+      if (description.length < 20) {
+        return res.status(400).send({
+          success: false,
+          message: "Problem description must contain at least 20 characters.",
+        });
+      }
+
+      
+      // 3. Validate preferred date
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(preferredDate)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid preferred date.",
+        });
+      }
+
+      const preferredDateObject = new Date(
+        `${preferredDate}T00:00:00.000Z`
+      );
+
+      //real calendar date.
+      if (
+        Number.isNaN(preferredDateObject.getTime()) ||
+        preferredDateObject.toISOString().slice(0, 10) !== preferredDate
+      ) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid preferred date.",
+        });
+      }
+
+      // date validate
+      const today = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Dhaka",
+      }).format(new Date());
+
+      if (preferredDate < today) {
+        return res.status(400).send({
+          success: false,
+          message: "Preferred date cannot be in the past.",
+        });
+      }
+
+      
+      //Get authenticated customer information
+      const customerEmail = req.user?.email;
+      const customerName = req.user?.name;
+
+      if (!customerEmail || !customerName) {
+        return res.status(401).send({
+          success: false,
+          message: "Customer authentication information is missing.",
+        });
+      }
+
+      
+      //service from MongoDB
+      const service = await servicesCollection.findOne({
+        _id: new ObjectId(serviceId),
+        approvalStatus: "approved",
+        isAvailable: true,
+      });
+
+      if (!service) {
+        return res.status(404).send({
+          success: false,
+          message: "This service is no longer available.",
+        });
+      }
+
+      
+      //prevent duplicate active requests
+      const existingBooking = await bookingsCollection.findOne({
+        serviceId: service._id.toString(),
+        customerEmail,
+        status: {
+          $in: ["requested", "accepted", "in-progress"],
+        },
+      });
+
+      if (existingBooking) {
+        return res.status(409).send({
+          success: false,
+          message: "You already have an active request for this service.",
+          code: "DUPLICATE_ACTIVE_REQUEST",
+        });
+      }
+
+      
+      //Prepare booking document
+      const booking = {
+        serviceId: service._id.toString(),
+
+        // Copied from the service document.
+        serviceTitle: service.title,
+        serviceImage: service.image,
+        category: service.category,
+        basePrice: service.basePrice,
+        technicianName: service.technicianName,
+        technicianEmail: service.technicianEmail,
+        customerName,
+        customerEmail,
+
+        customerPhone: phone,
+        address: serviceAddress,
+        preferredDate: preferredDateObject,
+        problemDescription: description,
+
+        status: "requested",
+        finalAmount: service.basePrice,
+        paymentStatus: "unpaid",
+      };
+
+      
+      //insert booking
+      const result = await bookingsCollection.insertOne(booking);
+
+      return res.status(201).send({
+        success: true,
+        message: "Repair request submitted successfully.",
+        bookingId: result.insertedId.toString(),
+      });
+
+    } catch (error) {
+      console.error("Create booking error:", error);
+
+      return res.status(500).send({
+        success: false,
+        message: "Failed to submit repair request.",
+      });
+    }
+  }
+);
+
+
+
 //----------------------------^^-----All Customer API-------^^^----------------------//
 
 
@@ -810,11 +972,581 @@ app.get("/technician/services/:email/count", verifyToken, verifyTechnician, asyn
 
 
 
+// Create a new service (techni only)
+app.post("/technician/services",verifyToken,verifyTechnician, async (req, res) => {
+        try {
+            const {
+                title,
+                category,
+                description,
+                image,
+                basePrice,
+                estimatedDuration,
+                serviceMode,
+                serviceArea,
+                isAvailable,
+            } = req.body ?? {};
+
+            
+            // 1. Get technician from JWT
+            const technicianEmail = req.user?.email?.trim().toLowerCase();
+            const technicianName = req.user?.name?.trim();
+
+            if (!technicianEmail || !technicianName) {
+                return res.status(401).send({
+                    message: "Technician information is missing.",
+                });
+            }
+
+
+            // 2. Validate required text fields
+            const requiredFields = [
+                title,
+                category,
+                description,
+                image,
+                estimatedDuration,
+                serviceMode,
+                serviceArea,
+            ];
+
+            if (
+                requiredFields.some(
+                    (value) =>
+                        typeof value !== "string" || !value.trim()
+                )
+            ) {
+                return res.status(400).send({
+                    message: "Please provide all required service information.",
+                });
+            }
+
+            // 3. Validate category
+            const allowedCategories = [
+                "Smartphone",
+                "Laptop & PC",
+                "AC",
+                "Refrigerator",
+                "TV",
+                "Washing Machine",
+                "Electrical",
+                "others"
+            ];
+
+            if (!allowedCategories.includes(category)) {
+                return res.status(400).send({
+                    message: "Invalid service category.",
+                });
+            }
+
+            // 4. Validate service mode
+            const allowedServiceModes = [
+                "Home Visit",
+                "Shop Drop-off",
+            ];
+
+            if (!allowedServiceModes.includes(serviceMode)) {
+                return res.status(400).send({
+                    message: "Invalid service mode.",
+                });
+            }
+
+            // 5. Validate base price
+            const parsedBasePrice = Number(basePrice);
+            if (
+                !Number.isFinite(parsedBasePrice) ||
+                parsedBasePrice <= 0
+            ) {
+                return res.status(400).send({
+                    message: "Starting price must be greater than zero.",
+                });
+            }
+
+            // 6. Validate uploaded image URL
+            let imageUrl;
+            try {
+                imageUrl = new URL(image);
+            } catch {
+                return res.status(400).send({
+                    message: "Please upload a valid service image.",
+                });
+            }
+
+            if (
+                imageUrl.protocol !== "https:" ||
+                !(
+                    imageUrl.hostname === "ibb.co" ||
+                    imageUrl.hostname.endsWith(".ibb.co")
+                )
+            ) {
+                return res.status(400).send({
+                    message: "Please use an image hosted on ImgBB.",
+                });
+            }
+
+            // 7. Validate availability
+            if (
+                typeof isAvailable !== "undefined" &&
+                typeof isAvailable !== "boolean"
+            ) {
+                return res.status(400).send({
+                    message: "Invalid availability value.",
+                });
+            }
+
+            // 8. Prepare service document
+            const serviceData = {
+                title: title.trim(),
+                category,
+                description: description.trim(),
+                image: imageUrl.toString(),
+                basePrice: parsedBasePrice,
+                estimatedDuration: estimatedDuration.trim(),
+                serviceMode,
+                serviceArea: serviceArea.trim(),
+
+                //techni identity from jwt
+                technicianName,
+                technicianEmail,
+
+                //admin approve
+                approvalStatus: "pending",
+
+                isAvailable: isAvailable ?? true,
+
+                createdAt: new Date().toISOString(),
+            };
+
+            // 9. insert mongoDb
+            const result = await servicesCollection.insertOne(serviceData);
+
+            return res.status(201).send({
+                success: true,
+                message: "Service created and submitted for admin approval.",
+                insertedId: result.insertedId,
+            });
+
+        } catch (error) {
+            console.error("Error creating technician service:", error);
+
+            return res.status(500).send({
+                message: "Failed to create service. Please try again.",
+            });
+        }
+    }
+);
+
+
+
+//get all services loggedin techni
+app.get("/technician/my-services",verifyToken,verifyTechnician,async (req, res) => {
+        try {
+            const technicianEmail = req.user?.email;
+
+            if (!technicianEmail) {
+                return res.status(401).send({
+                    message: "Technician information is missing.",
+                });
+            }
+
+            const services = await servicesCollection.find({ technicianEmail }).sort({ createdAt: -1 }).toArray();
+
+            return res.status(200).send(services);
+
+        } catch (error) {
+            console.error("Get technician services error:", error);
+
+            return res.status(500).send({
+                message: "Failed to fetch your services.",
+            });
+        }
+    }
+);
+
+
+//update service availability
+app.patch("/technician/services/:id/availability",verifyToken,verifyTechnician,async (req, res) => {
+        try {
+            const { id } = req.params;
+            const { isAvailable } = req.body ?? {};
+            const technicianEmail = req.user?.email;
+
+
+            if (typeof isAvailable !== "boolean") {
+                return res.status(400).send({
+                    message: "Availability must be true or false.",
+                });
+            }
+
+            if (!technicianEmail) {
+                return res.status(401).send({
+                    message: "Technician information is missing.",
+                });
+            }
+
+            const filter = {
+                _id: new ObjectId(id),
+                technicianEmail,
+            };
+
+            const service = await servicesCollection.findOne(filter);
+
+            if (!service) {
+                return res.status(404).send({
+                    message: "Service not found.",
+                });
+            }
+
+            if (service.approvalStatus === "rejected") {
+                return res.status(403).send({
+                    message: "Rejected services cannot change availability.",
+                });
+            }
+
+         
+            const result = await servicesCollection.updateOne(
+                {
+                    ...filter,
+                    approvalStatus: { $ne: "rejected" },
+                },
+                {
+                    $set: { isAvailable },
+                }
+            );
+
+            if (result.matchedCount === 0) {
+                return res.status(403).send({
+                    message: "This service can no longer change availability.",
+                });
+            }
+
+            const updatedService = await servicesCollection.findOne(filter);
+
+            return res.status(200).send({
+                success: true,
+                message: "Service availability updated successfully.",
+                service: updatedService,
+            });
+
+        } catch (error) {
+            console.error("Update availability error:", error);
+
+            return res.status(500).send({
+                message: "Failed to update service availability.",
+            });
+        }
+    }
+);
+
+
+//update sevice
+app.patch("/technician/services/update/:id",verifyToken,verifyTechnician,async (req, res) => {
+        try {
+            const { id } = req.params;
+            const technicianEmail = req.user?.email;
+
+
+            if (!technicianEmail) {
+                return res.status(401).send({
+                    message: "Technician information is missing.",
+                });
+            }
+
+            const {
+                title,
+                category,
+                description,
+                image,
+                basePrice,
+                estimatedDuration,
+                serviceMode,
+                serviceArea,
+            } = req.body ?? {};
+
+            // validate fields
+            const textFields = [
+                title,
+                category,
+                description,
+                image,
+                estimatedDuration,
+                serviceMode,
+                serviceArea,
+            ];
+
+            if (
+                textFields.some(
+                    (value) =>
+                        typeof value !== "string" || !value.trim()
+                )
+            ) {
+                return res.status(400).send({
+                    message: "Please provide all required service fields.",
+                });
+            }
+
+            //validate category
+            const allowedCategories = [
+                "Smartphone",
+                "Laptop & PC",
+                "AC",
+                "Refrigerator",
+                "TV",
+                "Washing Machine",
+                "Electrical",
+                "others",
+            ];
+
+            if (!allowedCategories.includes(category)) {
+                return res.status(400).send({
+                    message: "Invalid service category.",
+                });
+            }
+
+            // validate service mode
+            const allowedServiceModes = [
+                "Home Visit",
+                "Shop Drop-off",
+            ];
+
+            if (!allowedServiceModes.includes(serviceMode)) {
+                return res.status(400).send({
+                    message: "Invalid service mode.",
+                });
+            }
+
+            //validate price
+            const parsedPrice = Number(basePrice);
+
+            if (
+                !Number.isFinite(parsedPrice) ||
+                parsedPrice <= 0
+            ) {
+                return res.status(400).send({
+                    message: "Base price must be greater than zero.",
+                });
+            }
+
+            //Validate image URL
+            let imageUrl;
+
+            try {
+                imageUrl = new URL(image);
+            } catch {
+                return res.status(400).send({
+                    message: "Please provide a valid service image URL.",
+                });
+            }
+
+            if (imageUrl.protocol !== "https:" && imageUrl.protocol !== "http:") {
+                return res.status(400).send({
+                    message: "Invalid image URL.",
+                });
+            }
+
+
+            // Verify service ownership
+            const filter = {_id: new ObjectId(id),technicianEmail};
+
+            const existingService = await servicesCollection.findOne(filter);
+
+            if (!existingService) {
+                return res.status(404).send({
+                    message: "Service not found.",
+                });
+            }
+
+            // Updated service
+            const updateData = {
+                title: title.trim(),
+                category,
+                description: description.trim(),
+                image: imageUrl.toString(),
+                basePrice: parsedPrice,
+                estimatedDuration: estimatedDuration.trim(),
+                serviceMode,
+                serviceArea: serviceArea.trim(),
+                approvalStatus: "pending",
+            };
+
+            const result = await servicesCollection.updateOne(filter,{ $set: updateData });
+
+            if (result.matchedCount === 0) {
+                return res.status(404).send({
+                    message: "Service not found.",
+                });
+            }
+
+            const updatedService = await servicesCollection.findOne(filter);
+
+            return res.status(200).send({
+                success: true,
+                message: "Service updated and submitted for re-approval.",
+                service: updatedService,
+            });
+
+        } catch (error) {
+            console.error("Update technician service error:", error);
+
+            return res.status(500).send({
+                message: "Failed to update service.",
+            });
+        }
+    }
+);
+
+
+//delete servise
+app.delete("/technician/services/:id",verifyToken,verifyTechnician,async (req, res) => {
+        try {
+            const { id } = req.params;
+            const technicianEmail = req.user?.email;
+
+
+            if (!technicianEmail) {
+                return res.status(401).send({
+                    message: "Technician information is missing.",
+                });
+            }
+
+            const result = await servicesCollection.deleteOne({
+                _id: new ObjectId(id),
+                technicianEmail,
+            });
+
+            if (result.deletedCount === 0) {
+                return res.status(404).send({
+                    message: "Service not found.",
+                });
+            }
+
+            return res.status(200).send({
+                success: true,
+                message: "Service deleted successfully.",
+            });
+
+        } catch (error) {
+            console.error("Delete technician service error:", error);
+
+            return res.status(500).send({
+                message: "Failed to delete service.",
+            });
+        }
+    }
+);
+
+
 
 
 
 
 //----------------------------^^-----All Technician API-------^^^----------------------//
+
+
+
+
+
+
+//-------------------------All service(public) apis------------------------------//
+
+
+//api for featured secition
+app.get("/services/featured", async (req, res) => {
+  try {
+    const featuredServices = await servicesCollection.find({
+        approvalStatus: "approved",
+        isAvailable: true,
+      }).sort({ createdAt: -1 }).limit(6).toArray();
+
+    return res.status(200).send(featuredServices);
+  } catch (error) {
+    console.error("Featured services error:", error);
+
+    return res.status(500).send({
+      message: "Unable to fetch featured services.",
+    });
+  }
+});
+
+
+
+//get service details (public)
+app.get("/services/:id", async (req, res) => {
+    try {
+        const { id } = req.params;
+        // Validate MongoDB ObjectId.
+        if (!ObjectId.isValid(id)) {
+            return res.status(404).send({
+                message: "Service not found.",
+            });
+        }
+        //approved and available
+        const service = await servicesCollection.findOne({
+            _id: new ObjectId(id),
+            approvalStatus: "approved",
+            isAvailable: true,
+        });
+
+        if (!service) {
+            return res.status(404).send({
+                message: "Service not found.",
+            });
+        }
+
+        const technicianProfile = await usersCollection.findOne(
+            { email: service.technicianEmail },
+            {
+                projection: {
+                    _id: 0,
+                    name: 1,
+                    image: 1,
+                    area: 1,
+                    bio: 1,
+                },
+            }
+        );
+
+        const technician = {
+            name: technicianProfile?.name || service.technicianName,
+            image: technicianProfile?.image || "",
+            area: technicianProfile?.area || "",
+            bio:
+                typeof technicianProfile?.bio === "string"
+                    ? technicianProfile.bio.trim()
+                    : "",
+        };
+
+        return res.status(200).send({
+            service,
+            technician,
+        });
+
+    } catch (error) {
+        console.error("Get service details error:", error);
+
+        return res.status(500).send({
+            message: "Failed to fetch service details.",
+        });
+    }
+});
+
+
+
+
+
+
+
+
+
+//-------------^^^------------All service(public) apis--------^^^----------------------//
+
+
+
+
+
+
+
+
 
 
 
