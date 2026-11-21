@@ -1951,10 +1951,6 @@ app.get("/services", async (req, res) => {
 //----------------------------All ADIMIN APIs-----------------------------------------//
 
 
-
-
-// GET /admin/dashboard/overview?range=all|7d|30d
-
 //for admin dashboard main overview
 app.get("/admin/dashboard/overview",verifyToken,verifyAdmin,async (req, res) => {
     try {
@@ -2510,92 +2506,446 @@ app.get("/admin/dashboard/overview",verifyToken,verifyAdmin,async (req, res) => 
 
 
 
+//admin mange user page api
+app.get("/admin/users", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const allowedRoles = ["customer", "technician", "admin"];
 
+    const role =
+      typeof req.query.role === "string"
+        ? req.query.role
+        : "all";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// Get all users
-app.get('/users', async (req, res) => {
-    try {
-        const users = await usersCollection.find().toArray();
-        res.json(users);
-    } catch (error) {
-        console.error('Error fetching users:', error);
-        res.status(500).json({ error: 'Internal Server Error' });
+    if (role !== "all" && !allowedRoles.includes(role)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid role filter.",
+      });
     }
+
+    const filter = role === "all" ? {} : { role };
+
+    const adminEmail = String(req.user.email || "")
+      .trim()
+      .toLowerCase();
+
+    const [userDocs, totalUsers] = await Promise.all([
+      usersCollection
+        .find(filter, {
+          projection: {
+            name: 1,
+            email: 1,
+            image: 1,
+            role: 1,
+            createdAt: 1,
+          },
+        })
+        .sort({ createdAt: -1, _id: -1 })
+        .toArray(),
+
+      usersCollection.countDocuments({}),
+    ]);
+
+    const users = userDocs.map((user) => ({
+      id: user._id.toString(),
+      name: user.name,
+      email: user.email,
+      image: user.image || null,
+      role: user.role || "customer",
+      joinedAt: user.createdAt || null,
+      isCurrentUser:
+        String(user.email || "").trim().toLowerCase() === adminEmail,
+    }));
+
+    res.send({
+      success: true,
+      totalUsers,
+      users,
+    });
+  } catch (error) {
+    console.error("Get admin users error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to retrieve users.",
+    });
+  }
 });
 
 
 
-//update role (admin api)
-app.patch('/update/user/:id', async (req, res) => {
-    const { id } = req.params;
+//update a user role
+app.patch("/admin/users/:id/role",verifyToken,verifyAdmin,async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { role } = req.body;
 
-    const result = await usersCollection.updateOne(
+      const allowedRoles = ["customer", "technician", "admin"];
+
+      if (!allowedRoles.includes(role)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid user role.",
+        });
+      }
+
+
+      const adminEmail = req.user.email
+
+      if (!adminEmail) {
+        return res.status(401).send({
+          success: false,
+          message: "Authentication information is missing.",
+        });
+      }
+
+
+      const targetUser = await usersCollection.findOne(
         { _id: new ObjectId(id) },
-        { $set: { accountType: req.body.accountType } }
+        {
+          projection: {
+            email: 1,
+            role: 1,
+          },
+        }
+      );
+
+      if (!targetUser) {
+        return res.status(404).send({
+          success: false,
+          message: "User not found.",
+        });
+      }
+
+
+      const targetEmail = String(targetUser.email || "")
+        .trim()
+        .toLowerCase();
+
+      if (targetEmail === adminEmail) {
+        return res.status(403).send({
+          success: false,
+          message: "You cannot change your own role.",
+        });
+      }
+
+
+      if (targetUser.role === role) {
+        return res.send({
+          success: true,
+          message: "User already has this role.",
+          role,
+        });
+      }
+
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            role,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).send({
+          success: false,
+          message: "User no longer exists.",
+        });
+      }
+
+      res.send({
+        success: true,
+        message: "User role updated successfully.",
+        role,
+      });
+    } catch (error) {
+      console.error("Update user role error:", error);
+
+      res.status(500).send({
+        success: false,
+        message: "Failed to update user role.",
+      });
+    }
+  }
+);
+
+
+
+
+//for service-approval page
+app.get("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { status = "all", category = "all" } = req.query;
+
+    const filter = {};
+
+    if (category !== "all") filter.category = category;
+
+    const allServices = await servicesCollection
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    //calculate status count
+    const counts = {
+      all: allServices.length,
+      pending: allServices.filter(s => s.approvalStatus === "pending").length,
+      approved: allServices.filter(s => s.approvalStatus === "approved").length,
+      rejected: allServices.filter(s => s.approvalStatus === "rejected").length,
+    };
+
+    //put pending services first
+    allServices.sort((a, b) => {
+      const order = { pending: 0, approved: 1, rejected: 2 };
+      return (order[a.approvalStatus] ?? 3) -
+             (order[b.approvalStatus] ?? 3);
+    });
+
+    //apply status filter
+    const filteredServices =
+      status === "all"
+        ? allServices
+        : allServices.filter(s => s.approvalStatus === status);
+
+    const services = filteredServices.map(({ _id, ...service }) => ({
+      ...service,
+      id: _id.toString(),
+    }));
+
+    const categories = await servicesCollection.distinct("category");
+
+    res.send({
+      success: true,
+      services,
+      categories,
+      counts,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to retrieve services.",
+    });
+  }
+});
+
+
+//approve reject service
+app.patch("/admin/services/:id/approval", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { approvalStatus, rejectionReason } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID." });
+    }
+
+    if (!["approved", "rejected"].includes(approvalStatus)) {
+      return res.status(400).send({ message: "Invalid approval status." });
+    }
+
+    if (approvalStatus === "rejected" && !rejectionReason?.trim()) {
+      return res.status(400).send({ message: "Rejection reason is required." });
+    }
+
+    const result = await servicesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          approvalStatus,
+          rejectionReason: approvalStatus === "rejected" ? rejectionReason.trim() : null,
+        },
+      }
     );
 
-    res.send(result);
+    if (!result.matchedCount) {
+      return res.status(404).send({ message: "Service not found." });
+    }
+
+    res.send({
+      success: true,
+      message: `Service ${approvalStatus} successfully.`,
+      approvalStatus,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to update service." });
+  }
 });
 
 
-app.get('/admin/all-services', async (req, res) => {
-    const results = await servicesCollection.aggregate([
-        {
-            $addFields: {
-                statusPriority: {
-                    $switch: {
-                        branches: [
-                            { case: { $eq: ["$approvalStatus", "pending"] }, then: 1 },
-                            { case: { $eq: ["$approvalStatus", "approved"] }, then: 2 },
-                            { case: { $eq: ["$approvalStatus", "rejected"] }, then: 3 }
-                        ],
-                        default: 99
-                    }
-                }
-            }
-        },
-        {
-            // Sort by custom status priority ascending, then createdAt descending
-            $sort: { statusPriority: 1, createdAt: -1 }
-        },
-        {
-            // Remove the temporary helper field before sending the response
-            $project: { statusPriority: 0 }
-        }
-    ]).toArray();
 
-    res.send(results);
+
+//api for booking page in admin dashrboa
+app.get("/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const bookings = await bookingsCollection
+      .find({})
+      .sort({ preferredDate: 1 })
+      .toArray();
+
+    res.send({
+      success: true,
+      totalBookings: bookings.length,
+      bookings,
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to retrieve bookings.",
+    });
+  }
 });
+
+
+
+//api for admin dashboard transactions
+app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { range = "all" } = req.query;
+    const now = new Date();
+
+    let startDate = null;
+
+    if (range === "today") {
+      startDate = new Date(now);
+      startDate.setUTCHours(0, 0, 0, 0);
+    } else if (range === "7d") {
+      startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    } else if (range === "30d") {
+      startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    } else if (range !== "all") {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid date range.",
+      });
+    }
+
+    const filter = startDate
+      ? { paidAt: { $gte: startDate, $lte: now } }
+      : {};
+
+    const transactions = await paymentsCollection
+      .find(filter)
+      .sort({ paidAt: -1 })
+      .toArray();
+
+    const totalRevenue = transactions.reduce((total, payment) => {
+      if (payment.paymentStatus !== "paid") return total;
+
+      const amount = Number(payment.amount);
+      return Number.isFinite(amount) ? total + amount : total;
+    }, 0);
+
+    res.send({
+      success: true,
+      totalRevenue,
+      transactions,
+    });
+  } catch (error) {
+    console.error("Get admin transactions error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to retrieve transactions.",
+    });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // Get all users
+// app.get('/users', async (req, res) => {
+//     try {
+//         const users = await usersCollection.find().toArray();
+//         res.json(users);
+//     } catch (error) {
+//         console.error('Error fetching users:', error);
+//         res.status(500).json({ error: 'Internal Server Error' });
+//     }
+// });
+
+
+
+// //update role (admin api)
+// app.patch('/update/user/:id', async (req, res) => {
+//     const { id } = req.params;
+
+//     const result = await usersCollection.updateOne(
+//         { _id: new ObjectId(id) },
+//         { $set: { accountType: req.body.accountType } }
+//     );
+
+//     res.send(result);
+// });
+
+
+// app.get('/admin/all-services', async (req, res) => {
+//     const results = await servicesCollection.aggregate([
+//         {
+//             $addFields: {
+//                 statusPriority: {
+//                     $switch: {
+//                         branches: [
+//                             { case: { $eq: ["$approvalStatus", "pending"] }, then: 1 },
+//                             { case: { $eq: ["$approvalStatus", "approved"] }, then: 2 },
+//                             { case: { $eq: ["$approvalStatus", "rejected"] }, then: 3 }
+//                         ],
+//                         default: 99
+//                     }
+//                 }
+//             }
+//         },
+//         {
+//             // Sort by custom status priority ascending, then createdAt descending
+//             $sort: { statusPriority: 1, createdAt: -1 }
+//         },
+//         {
+//             // Remove the temporary helper field before sending the response
+//             $project: { statusPriority: 0 }
+//         }
+//     ]).toArray();
+
+//     res.send(results);
+// });
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 //----------------^^^------------All ADIMIN APIs------^^^-----------------------------------//
