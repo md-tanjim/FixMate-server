@@ -19,6 +19,7 @@ if (!stripeSecretKey) {
 const stripe = new Stripe(stripeSecretKey);
 
 const app = express();
+app.use(cors());
 const PORT = 5000;
 
 
@@ -326,7 +327,7 @@ app.post("/webhook/stripe", express.raw({ type: "application/json" }), async (re
 
 
 
-app.use(cors());
+
 app.use(express.json());
 
 //JWT
@@ -2868,7 +2869,7 @@ app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
 
 
 
-
+export default app
 
 
 
