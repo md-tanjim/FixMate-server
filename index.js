@@ -2175,7 +2175,7 @@ app.get("/services", async (req, res) => {
 
 
 
-//----------------------------All ADIMIN APIs-----------------------------------------//
+//----------------------------All ADMIN APIs-----------------------------------------//
 
 
 //for admin dashboard main overview
@@ -3086,6 +3086,7 @@ app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
 
 
 
+//----------------^^^------------All ADIMIN APIs------^^^-----------------------------------//
 
 
 
@@ -3102,80 +3103,6 @@ export default app
 
 
 
-
-
-
-
-
-// // Get all users
-// app.get('/users', async (req, res) => {
-//     try {
-//         const users = await usersCollection.find().toArray();
-//         res.json(users);
-//     } catch (error) {
-//         console.error('Error fetching users:', error);
-//         res.status(500).json({ error: 'Internal Server Error' });
-//     }
-// });
-
-
-
-// //update role (admin api)
-// app.patch('/update/user/:id', async (req, res) => {
-//     const { id } = req.params;
-
-//     const result = await usersCollection.updateOne(
-//         { _id: new ObjectId(id) },
-//         { $set: { accountType: req.body.accountType } }
-//     );
-
-//     res.send(result);
-// });
-
-
-// app.get('/admin/all-services', async (req, res) => {
-//     const results = await servicesCollection.aggregate([
-//         {
-//             $addFields: {
-//                 statusPriority: {
-//                     $switch: {
-//                         branches: [
-//                             { case: { $eq: ["$approvalStatus", "pending"] }, then: 1 },
-//                             { case: { $eq: ["$approvalStatus", "approved"] }, then: 2 },
-//                             { case: { $eq: ["$approvalStatus", "rejected"] }, then: 3 }
-//                         ],
-//                         default: 99
-//                     }
-//                 }
-//             }
-//         },
-//         {
-//             // Sort by custom status priority ascending, then createdAt descending
-//             $sort: { statusPriority: 1, createdAt: -1 }
-//         },
-//         {
-//             // Remove the temporary helper field before sending the response
-//             $project: { statusPriority: 0 }
-//         }
-//     ]).toArray();
-
-//     res.send(results);
-// });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-//----------------^^^------------All ADIMIN APIs------^^^-----------------------------------//
 
 
 app.listen(PORT, () => {
