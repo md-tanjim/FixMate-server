@@ -607,6 +607,232 @@ app.post("/api/payments/create-checkout-session", verifyToken, verifyCustomer, a
 );
 
 
+
+
+
+
+//verify payment (and insert in paymetn collection if webhook didnt do it already)
+app.get("/api/payments/verify",verifyToken,verifyCustomer,async (req, res) => {
+        try {
+            const sessionId =
+                typeof req.query.session_id === "string"
+                    ? req.query.session_id.trim()
+                    : "";
+
+            const customerEmail = String(req.user?.email || "")
+                .trim()
+                .toLowerCase();
+
+            if (!sessionId.startsWith("cs_")) {
+                return res.status(400).send({
+                    success: false,
+                    message: "Invalid Stripe Checkout Session ID.",
+                });
+            }
+
+            if (!customerEmail) {
+                return res.status(401).send({
+                    success: false,
+                    message: "Unable to identify the customer.",
+                });
+            }
+
+            // 1. Retrieve the session directly from Stripe.
+            const session = await stripe.checkout.sessions.retrieve(
+                sessionId
+            );
+
+            // 2. Confirm this is a completed, paid, one-time payment.
+            if (
+                session.mode !== "payment" ||
+                session.status !== "complete" ||
+                session.payment_status !== "paid"
+            ) {
+                return res.status(409).send({
+                    success: false,
+                    message: "Stripe has not confirmed this payment yet.",
+                });
+            }
+
+            // 3. Validate session metadata.
+            const bookingId = session.metadata?.bookingId;
+
+            const metadataEmail = String(
+                session.metadata?.customerEmail || ""
+            )
+                .trim()
+                .toLowerCase();
+
+            if (
+                !bookingId ||
+                !ObjectId.isValid(bookingId) ||
+                metadataEmail !== customerEmail
+            ) {
+                return res.status(403).send({
+                    success: false,
+                    message: "Payment ownership verification failed.",
+                });
+            }
+
+            // 4. Find and verify the customer's booking.
+            const bookingObjectId = new ObjectId(bookingId);
+
+            const booking = await bookingsCollection.findOne({
+                _id: bookingObjectId,
+            });
+
+            if (
+                !booking ||
+                booking.customerEmail?.trim().toLowerCase() !== customerEmail
+            ) {
+                return res.status(404).send({
+                    success: false,
+                    message: "Booking not found.",
+                });
+            }
+
+            if (booking.status !== "completed") {
+                return res.status(409).send({
+                    success: false,
+                    message: "This repair booking is not completed.",
+                });
+            }
+
+            // 5. Verify amount and currency against MongoDB.
+            const expectedAmount = Math.round(
+                Number(booking.finalAmount) * 100
+            );
+
+            if (
+                !Number.isSafeInteger(expectedAmount) ||
+                session.amount_total !== expectedAmount ||
+                session.currency !== "usd"
+            ) {
+                return res.status(400).send({
+                    success: false,
+                    message: "Payment amount verification failed.",
+                });
+            }
+
+            // 6. Get the Stripe transaction ID.
+            const transactionId =
+                typeof session.payment_intent === "string"
+                    ? session.payment_intent
+                    : session.payment_intent?.id;
+
+            if (!transactionId) {
+                return res.status(409).send({
+                    success: false,
+                    message: "Stripe transaction ID is unavailable.",
+                });
+            }
+
+            // 7. Check whether the webhook already saved this payment.
+            let existingPayment = await paymentsCollection.findOne({
+                bookingId,
+            });
+
+            if (
+                existingPayment &&
+                existingPayment.stripeSessionId !== session.id
+            ) {
+                return res.status(409).send({
+                    success: false,
+                    message: "This booking has already been paid.",
+                });
+            }
+
+            // 8. Insert only if the webhook has not already done so.
+            if (!existingPayment) {
+                const paymentData = {
+                    bookingId,
+                    serviceTitle: booking.serviceTitle,
+                    customerName: booking.customerName,
+                    customerEmail: booking.customerEmail,
+                    technicianName: booking.technicianName,
+                    technicianEmail: booking.technicianEmail,
+                    amount: Number(booking.finalAmount),
+                    currency: "usd",
+                    transactionId,
+                    stripeSessionId: session.id,
+                    paymentStatus: "paid",
+                    paidAt: new Date(session.created * 1000),
+                };
+
+                try {
+                    await paymentsCollection.insertOne(paymentData);
+                } catch (error) {
+                    // The webhook may have inserted it at the same time.
+                    if (error.code !== 11000) {
+                        throw error;
+                    }
+                }
+
+                existingPayment = await paymentsCollection.findOne({
+                    bookingId,
+                });
+
+                if (
+                    !existingPayment ||
+                    existingPayment.stripeSessionId !== session.id
+                ) {
+                    return res.status(409).send({
+                        success: false,
+                        message: "Payment record could not be verified.",
+                    });
+                }
+            }
+
+            // 9. Ensure the booking is marked as paid.
+            await bookingsCollection.updateOne(
+                {
+                    _id: bookingObjectId,
+                    status: "completed",
+                    paymentStatus: { $ne: "paid" },
+                },
+                {
+                    $set: {
+                        paymentStatus: "paid",
+                    },
+                }
+            );
+
+            const updatedBooking = await bookingsCollection.findOne({
+                _id: bookingObjectId,
+            });
+
+            if (updatedBooking?.paymentStatus !== "paid") {
+                throw new Error(
+                    "Payment was recorded but the booking could not be marked as paid."
+                );
+            }
+
+            // 10. Return only the payment details required by the customer.
+            return res.status(200).send({
+                success: true,
+                payment: {
+                    serviceTitle: existingPayment.serviceTitle,
+                    technicianName: existingPayment.technicianName,
+                    amount: existingPayment.amount,
+                    currency: existingPayment.currency,
+                    transactionId: existingPayment.transactionId,
+                    stripeSessionId: existingPayment.stripeSessionId,
+                    paymentStatus: existingPayment.paymentStatus,
+                    paidAt: existingPayment.paidAt,
+                },
+            });
+        } catch (error) {
+            console.error("Payment verification error:", error);
+
+            return res.status(500).send({
+                success: false,
+                message: "Unable to verify payment. Please try again.",
+            });
+        }
+    }
+);
+
+
 //---------------------------------ALL Stripe, Payment,Usres Related APIs--------------------------//
 
 
