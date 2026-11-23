@@ -200,4 +200,4 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## Notes
 
-- This repository contains the **Next.js frontend**. The Express backend is maintained separately and must be available for API-driven features to work.
+- This repository contains the **Express.js backend**. The Next.js frontend is maintained separately and must be available for API-driven features to work.
