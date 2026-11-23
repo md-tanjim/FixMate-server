@@ -864,7 +864,7 @@ app.get('/customer/bookings/:email/count-req-prog-comp', async (req, res) => {
 
     const [requested, inProgress, completed] = await Promise.all([
         bookingsCollection.countDocuments({ customerEmail: email }),
-        bookingsCollection.countDocuments({ customerEmail: email, status: "in-progress" }),
+        bookingsCollection.countDocuments({ customerEmail: email, status: { $in : ["accepted", "in-progress"]} }),
         bookingsCollection.countDocuments({ customerEmail: email, status: "completed" })
     ]);
 
